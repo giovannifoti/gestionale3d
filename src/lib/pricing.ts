@@ -97,9 +97,11 @@ export function calculatePrice(inputs: PricingInputs): PriceBreakdown {
   const marginAmount = marginBase * (inputs.marginPercent / 100);
   const colorSurcharge = inputs.color === "Colore" ? SURCHARGES.color * quantity : 0;
   const finishSurcharge = inputs.finish === "Effetto pietra" ? SURCHARGES.stoneEffect * quantity : 0;
-  const netPrice = marginBase + marginAmount + colorSurcharge + finishSurcharge;
-  const vatAmount = inputs.includeVat ? netPrice * (inputs.vatPercent / 100) : 0;
-  const grossPrice = netPrice + vatAmount;
+  const rawNetPrice = marginBase + marginAmount + colorSurcharge + finishSurcharge;
+  const rawVatAmount = inputs.includeVat ? rawNetPrice * (inputs.vatPercent / 100) : 0;
+  const grossPrice = roundFinalPrice(rawNetPrice + rawVatAmount);
+  const netPrice = inputs.includeVat ? roundTo(grossPrice / (1 + inputs.vatPercent / 100), 2) : grossPrice;
+  const vatAmount = inputs.includeVat ? grossPrice - netPrice : 0;
   const unitPrice = grossPrice / quantity;
 
   return {
@@ -137,4 +139,8 @@ export function formatNumber(value: number, digits = 1): string {
 function roundTo(value: number, digits: number): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
+}
+
+function roundFinalPrice(value: number): number {
+  return Math.round(value);
 }
