@@ -110,17 +110,20 @@ function App() {
   }, [products]);
 
   const pricedQuote = useMemo(() => {
-    const rows = quoteItems.map((item) => ({
-      item,
-      breakdown: calculatePrice({
+    const rows = quoteItems.map((item) => {
+      const automaticBreakdown = calculatePrice({
         ...pricing,
         quantity: item.quantity,
         manualMinutes: item.manualMinutes,
         filamentGrams: item.filamentGrams,
         color: item.color ?? pricing.color,
         finish: item.finish ?? pricing.finish,
-      }),
-    }));
+      });
+      return {
+        item,
+        breakdown: applyManualPriceToBreakdown(automaticBreakdown, item.manualPrice, item.quantity, pricing),
+      };
+    });
     return {
       rows,
       breakdown: rows.length ? combinePriceBreakdowns(rows.map((row) => row.breakdown)) : calculatePrice(pricing),
@@ -255,7 +258,7 @@ function App() {
     }));
   }
 
-  function updateQuoteItem(itemId: string, update: Partial<Pick<QuoteItem, "name" | "quantity" | "manualMinutes" | "filamentGrams">>) {
+  function updateQuoteItem(itemId: string, update: Partial<Pick<QuoteItem, "name" | "quantity" | "manualMinutes" | "filamentGrams" | "manualPrice">>) {
     setQuoteItems((previous) =>
       previous.map((item) => {
         if (item.id !== itemId) {
@@ -267,6 +270,7 @@ function App() {
           quantity: update.quantity !== undefined ? Math.max(1, update.quantity) : item.quantity,
           manualMinutes: update.manualMinutes !== undefined ? Math.max(1, update.manualMinutes) : item.manualMinutes,
           filamentGrams: update.filamentGrams !== undefined ? Math.max(1, update.filamentGrams) : item.filamentGrams,
+          manualPrice: update.manualPrice !== undefined ? normalizeManualPrice(update.manualPrice) : item.manualPrice,
         };
         return {
           ...next,
@@ -377,6 +381,14 @@ function App() {
   function deleteProduct(productId: string) {
     setProducts((previous) => previous.filter((product) => product.id !== productId));
     setSelectedProductIds((previous) => previous.filter((id) => id !== productId));
+  }
+
+  function updateProductManualPrice(productId: string, manualPrice: number) {
+    setProducts((previous) =>
+      previous.map((product) =>
+        product.id === productId ? { ...product, manualPrice: normalizeManualPrice(manualPrice) } : product,
+      ),
+    );
   }
 
   function applyProduct(product: FrequentProduct) {
@@ -531,6 +543,14 @@ function App() {
                               step={1}
                               value={item.filamentGrams}
                               onChange={(filamentGrams) => updateQuoteItem(item.id, { filamentGrams })}
+                            />
+                            <NumberField
+                              className="manual-price-field"
+                              label="Prezzo manuale € (0 auto)"
+                              min={0}
+                              step={1}
+                              value={item.manualPrice ?? 0}
+                              onChange={(manualPrice) => updateQuoteItem(item.id, { manualPrice })}
                             />
                           </div>
                           <div className="product-meta">
@@ -871,6 +891,13 @@ function App() {
                 value={productDraft.defaultQuantity}
                 onChange={(defaultQuantity) => setProductDraft((previous) => ({ ...previous, defaultQuantity }))}
               />
+              <NumberField
+                label="Prezzo manuale € (0 auto)"
+                min={0}
+                step={1}
+                value={productDraft.manualPrice ?? 0}
+                onChange={(manualPrice) => setProductDraft((previous) => ({ ...previous, manualPrice: normalizeManualPrice(manualPrice) }))}
+              />
               <ToggleOption
                 checked={productDraft.color === "Colore"}
                 description="Bianco e nero restano prezzo base"
@@ -967,6 +994,13 @@ function App() {
                           value={`${formatNumber(product.boundingBox.x)} x ${formatNumber(product.boundingBox.y)} x ${formatNumber(product.boundingBox.z)} mm`}
                         />
                       )}
+                      <NumberField
+                        label="Prezzo manuale € (0 auto)"
+                        min={0}
+                        step={1}
+                        value={product.manualPrice ?? 0}
+                        onChange={(manualPrice) => updateProductManualPrice(product.id, manualPrice)}
+                      />
                     </div>
                     {product.notes && <p>{product.notes}</p>}
                     <div className="button-row">
@@ -1058,12 +1092,14 @@ function LockedItem({ icon, label, value }: { icon: ReactNode; label: string; va
 }
 
 function NumberField({
+  className,
   label,
   value,
   min,
   step,
   onChange,
 }: {
+  className?: string;
   label: string;
   value: number;
   min: number;
@@ -1071,7 +1107,7 @@ function NumberField({
   onChange: (value: number) => void;
 }) {
   return (
-    <label>
+    <label className={className}>
       {label}
       <input
         min={min}
@@ -1144,6 +1180,7 @@ function makeProductQuoteItem(product: FrequentProduct): QuoteItem {
     quantity: product.defaultQuantity,
     manualMinutes: product.defaultMinutes,
     filamentGrams: product.defaultGrams,
+    manualPrice: product.manualPrice,
     color: product.color,
     finish: product.finish,
     metrics: {
@@ -1201,19 +1238,53 @@ function combinePriceBreakdowns(breakdowns: PriceBreakdown[]): PriceBreakdown {
   };
 }
 
+function applyManualPriceToBreakdown(
+  breakdown: PriceBreakdown,
+  manualPrice: number | undefined,
+  quantity: number,
+  pricing: PricingInputs,
+): PriceBreakdown {
+  const normalizedManualPrice = normalizeManualPrice(manualPrice ?? 0);
+  if (!normalizedManualPrice) {
+    return breakdown;
+  }
+  const vatRate = pricing.includeVat ? pricing.vatPercent / 100 : 0;
+  const netPrice = vatRate ? roundMoney(normalizedManualPrice / (1 + vatRate)) : normalizedManualPrice;
+  const vatAmount = normalizedManualPrice - netPrice;
+  return {
+    ...breakdown,
+    netPrice,
+    vatAmount,
+    grossPrice: normalizedManualPrice,
+    unitPrice: normalizedManualPrice / Math.max(1, quantity),
+  };
+}
+
+function normalizeManualPrice(value: number): number | undefined {
+  if (!Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return Math.round(value);
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
 function stripFileExtension(fileName: string): string {
   return fileName.replace(/\.[^.]+$/, "");
 }
 
 function calculateProductPrice(product: FrequentProduct): number {
-  return calculatePrice({
+  const automaticBreakdown = calculatePrice({
     ...DEFAULT_PRICING,
     quantity: product.defaultQuantity,
     manualMinutes: product.defaultMinutes,
     filamentGrams: product.defaultGrams,
     color: product.color,
     finish: product.finish,
-  }).grossPrice;
+  });
+  return applyManualPriceToBreakdown(automaticBreakdown, product.manualPrice, product.defaultQuantity, DEFAULT_PRICING).grossPrice;
 }
 
 export default App;

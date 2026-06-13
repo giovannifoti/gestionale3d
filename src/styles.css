@@ -653,6 +653,10 @@ textarea:focus {
   grid-template-columns: 1fr 0.55fr 0.75fr 0.75fr;
 }
 
+.manual-price-field {
+  grid-column: 1 / -1;
+}
+
 .screen-section {
   display: grid;
   gap: 16px;

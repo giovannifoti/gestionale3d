@@ -207,11 +207,17 @@ function buildSavedOrderItemRows(order: Order): string {
         finish: item.finish ?? pricing.finish,
         includeVat: false,
       });
-          return `
+      const visiblePrice =
+        item.manualPrice && item.manualPrice > 0
+          ? order.includeVat
+            ? Math.round((item.manualPrice / (1 + (order.vatPercent ?? 22) / 100)) * 100) / 100
+            : item.manualPrice
+          : lineBreakdown.netPrice;
+      return `
         <tr>
           <td>${escapeHtml(item.name)}</td>
           <td>${item.quantity} pz, ${getMaterial(order.materialKey).name}, ${escapeHtml(item.color ?? order.color ?? "Bianco")}, ${escapeHtml(item.finish ?? order.finish ?? "Standard")}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad.</td>
-          <td class="num">${formatCurrency(lineBreakdown.netPrice)}</td>
+          <td class="num">${formatCurrency(visiblePrice)}</td>
         </tr>
       `;
     })
