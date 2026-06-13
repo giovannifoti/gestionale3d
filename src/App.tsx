@@ -77,6 +77,7 @@ function App() {
   const [notes, setNotes] = useState("Validita preventivo: 15 giorni. Bianco e nero inclusi nel prezzo base.");
   const [orders, setOrders] = useState<Order[]>([]);
   const [products, setProducts] = useState<FrequentProduct[]>([]);
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [productDraft, setProductDraft] = useState(EMPTY_PRODUCT);
   const [productSource, setProductSource] = useState<ParsedFile | null>(null);
   const [isParsing, setIsParsing] = useState(false);
@@ -116,6 +117,8 @@ function App() {
         quantity: item.quantity,
         manualMinutes: item.manualMinutes,
         filamentGrams: item.filamentGrams,
+        color: item.color ?? pricing.color,
+        finish: item.finish ?? pricing.finish,
       }),
     }));
     return {
@@ -135,6 +138,7 @@ function App() {
   );
   const selectedMaterial = getMaterial("pla");
   const filteredOrders = activeStatus === "Tutti" ? orders : orders.filter((order) => order.status === activeStatus);
+  const selectedProducts = products.filter((product) => selectedProductIds.includes(product.id));
   const quoteWarnings = quoteItems.length
     ? quoteItems.flatMap((item) => item.metrics.warnings.map((warning) => `${item.name}: ${warning}`))
     : (parsed?.metrics.warnings ?? []);
@@ -372,24 +376,66 @@ function App() {
 
   function deleteProduct(productId: string) {
     setProducts((previous) => previous.filter((product) => product.id !== productId));
+    setSelectedProductIds((previous) => previous.filter((id) => id !== productId));
   }
 
   function applyProduct(product: FrequentProduct) {
-    const item = makeProductQuoteItem(product);
-    setQuoteItems((previous) => [...previous, item]);
+    applyProducts([product], {
+      copySingleProductNotes: true,
+      defaultQuoteName: "Preventivo multiprodotto",
+    });
+  }
+
+  function applySelectedProducts() {
+    applyProducts(selectedProducts, {
+      defaultQuoteName: selectedProducts.length === 1 ? selectedProducts[0].name : `Preventivo ${selectedProducts.length} prodotti frequenti`,
+    });
+    setSelectedProductIds([]);
+  }
+
+  function applyAllProducts() {
+    applyProducts(products, {
+      defaultQuoteName: products.length === 1 ? products[0].name : `Preventivo ${products.length} prodotti frequenti`,
+    });
+    setSelectedProductIds([]);
+  }
+
+  function applyProducts(
+    productsToApply: FrequentProduct[],
+    options: { copySingleProductNotes?: boolean; defaultQuoteName?: string } = {},
+  ) {
+    if (!productsToApply.length) {
+      return;
+    }
+    const newItems = productsToApply.map(makeProductQuoteItem);
+    const firstProduct = productsToApply[0];
+    const sameColor = productsToApply.every((product) => product.color === firstProduct.color);
+    const sameFinish = productsToApply.every((product) => product.finish === firstProduct.finish);
+    setQuoteItems((previous) => [...previous, ...newItems]);
     setParsed({
-      metrics: item.metrics,
-      preview: { kind: "empty", message: "Prodotto richiamato dal catalogo." },
+      metrics: newItems[0].metrics,
+      preview: { kind: "empty", message: "Prodotti richiamati dal catalogo." },
     });
-    setItemName((previous) => (previous === "Stampa personalizzata" ? "Preventivo multiprodotto" : previous));
+    setItemName((previous) => {
+      if (previous !== "Stampa personalizzata") {
+        return previous;
+      }
+      return options.defaultQuoteName ?? "Preventivo multiprodotto";
+    });
     patchPricing({
-      color: product.color,
-      finish: product.finish,
+      ...(sameColor ? { color: firstProduct.color } : {}),
+      ...(sameFinish ? { finish: firstProduct.finish } : {}),
     });
-    if (product.notes) {
-      setNotes(product.notes);
+    if (options.copySingleProductNotes && firstProduct.notes) {
+      setNotes(firstProduct.notes);
     }
     setView("nuovo");
+  }
+
+  function toggleProductSelection(productId: string, checked: boolean) {
+    setSelectedProductIds((previous) =>
+      checked ? Array.from(new Set([...previous, productId])) : previous.filter((id) => id !== productId),
+    );
   }
 
   return (
@@ -725,7 +771,9 @@ function App() {
                   <div>
                     <strong>{order.fileName}</strong>
                     <span>
-                      {order.items?.length ? `${order.items.length} prodotti / ${order.quantity} pz` : `${order.quantity} pz`} · {order.color || "Bianco"} · {order.finish || "Standard"}
+                      {order.items?.length
+                        ? `${order.items.length} prodotti / ${order.quantity} pz · opzioni per prodotto`
+                        : `${order.quantity} pz · ${order.color || "Bianco"} · ${order.finish || "Standard"}`}
                     </span>
                   </div>
                   <div>
@@ -849,14 +897,45 @@ function App() {
           </section>
 
           <section className="panel">
-            <PanelTitle icon={<Package size={18} />} title="Catalogo rapido" />
+            <div className="catalog-header">
+              <PanelTitle icon={<Package size={18} />} title="Catalogo rapido" />
+              {products.length ? <span>{selectedProducts.length} selezionati</span> : null}
+            </div>
+            {products.length ? (
+              <div className="catalog-actions">
+                <button className="secondary-button" onClick={() => setSelectedProductIds(products.map((product) => product.id))}>
+                  Seleziona tutti
+                </button>
+                <button className="secondary-button" disabled={!selectedProducts.length} onClick={() => setSelectedProductIds([])}>
+                  Deseleziona
+                </button>
+                <button className="primary-button" disabled={!selectedProducts.length} onClick={applySelectedProducts}>
+                  <ReceiptText size={18} />
+                  Usa selezionati
+                </button>
+                <button className="secondary-button" onClick={applyAllProducts}>
+                  <Package size={18} />
+                  Usa tutti
+                </button>
+              </div>
+            ) : null}
             <div className="product-catalog">
               {products.length ? (
                 products.map((product) => (
-                  <article className="product-card" key={product.id}>
-                    <div>
-                      <strong>{product.name}</strong>
-                      <span>{product.sku || product.sourceFileName || "Senza codice"}</span>
+                  <article className={`product-card ${selectedProductIds.includes(product.id) ? "is-selected" : ""}`} key={product.id}>
+                    <div className="product-card-head">
+                      <div>
+                        <strong>{product.name}</strong>
+                        <span>{product.sku || product.sourceFileName || "Senza codice"}</span>
+                      </div>
+                      <label className="product-select">
+                        <input
+                          checked={selectedProductIds.includes(product.id)}
+                          type="checkbox"
+                          onChange={(event) => toggleProductSelection(product.id, event.target.checked)}
+                        />
+                        <span>Seleziona</span>
+                      </label>
                     </div>
                     <div className="product-meta">
                       <span>
@@ -1065,6 +1144,8 @@ function makeProductQuoteItem(product: FrequentProduct): QuoteItem {
     quantity: product.defaultQuantity,
     manualMinutes: product.defaultMinutes,
     filamentGrams: product.defaultGrams,
+    color: product.color,
+    finish: product.finish,
     metrics: {
       fileName: product.sourceFileName ?? product.name,
       fileSize: product.sourceFileSize ?? 0,

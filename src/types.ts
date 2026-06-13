@@ -70,6 +70,8 @@ export type QuoteItem = {
   quantity: number;
   manualMinutes: number;
   filamentGrams: number;
+  color?: FilamentColor;
+  finish?: PrintFinish;
   metrics: PrintMetrics;
 };
 

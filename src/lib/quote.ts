@@ -176,7 +176,7 @@ function buildQuoteItemRows(items: QuoteLinePayload[], materialName: string, pri
       ({ item, breakdown }) => `
         <tr>
           <td>${escapeHtml(item.name)}</td>
-          <td>${item.quantity} pz, ${materialName}, ${escapeHtml(pricing.color)}, ${escapeHtml(pricing.finish)}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad., ${formatNumber(pricing.powerKw, 2)} kW medi</td>
+          <td>${item.quantity} pz, ${materialName}, ${escapeHtml(item.color ?? pricing.color)}, ${escapeHtml(item.finish ?? pricing.finish)}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad., ${formatNumber(pricing.powerKw, 2)} kW medi</td>
           <td class="num">${formatCurrency(breakdown.netPrice)}</td>
         </tr>
       `,
@@ -203,12 +203,14 @@ function buildSavedOrderItemRows(order: Order): string {
         quantity: item.quantity,
         manualMinutes: item.manualMinutes,
         filamentGrams: item.filamentGrams,
+        color: item.color ?? pricing.color,
+        finish: item.finish ?? pricing.finish,
         includeVat: false,
       });
-      return `
+          return `
         <tr>
           <td>${escapeHtml(item.name)}</td>
-          <td>${item.quantity} pz, ${getMaterial(order.materialKey).name}, ${escapeHtml(order.color || "Bianco")}, ${escapeHtml(order.finish || "Standard")}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad.</td>
+          <td>${item.quantity} pz, ${getMaterial(order.materialKey).name}, ${escapeHtml(item.color ?? order.color ?? "Bianco")}, ${escapeHtml(item.finish ?? order.finish ?? "Standard")}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad.</td>
           <td class="num">${formatCurrency(lineBreakdown.netPrice)}</td>
         </tr>
       `;
