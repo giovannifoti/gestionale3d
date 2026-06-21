@@ -70,6 +70,7 @@ export type QuoteItem = {
   quantity: number;
   manualMinutes: number;
   filamentGrams: number;
+  manualUnitPrice?: number;
   manualPrice?: number;
   color?: FilamentColor;
   finish?: PrintFinish;
@@ -179,6 +180,7 @@ export type FrequentProduct = {
   defaultMinutes: number;
   defaultGrams: number;
   defaultQuantity: number;
+  manualUnitPrice?: number;
   manualPrice?: number;
   color: FilamentColor;
   finish: PrintFinish;

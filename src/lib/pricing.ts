@@ -97,11 +97,9 @@ export function calculatePrice(inputs: PricingInputs): PriceBreakdown {
   const marginAmount = marginBase * (inputs.marginPercent / 100);
   const colorSurcharge = inputs.color === "Colore" ? SURCHARGES.color * quantity : 0;
   const finishSurcharge = inputs.finish === "Effetto pietra" ? SURCHARGES.stoneEffect * quantity : 0;
-  const rawNetPrice = marginBase + marginAmount + colorSurcharge + finishSurcharge;
-  const rawVatAmount = inputs.includeVat ? rawNetPrice * (inputs.vatPercent / 100) : 0;
-  const grossPrice = roundFinalPrice(rawNetPrice + rawVatAmount);
-  const netPrice = inputs.includeVat ? roundTo(grossPrice / (1 + inputs.vatPercent / 100), 2) : grossPrice;
-  const vatAmount = inputs.includeVat ? grossPrice - netPrice : 0;
+  const netPrice = marginBase + marginAmount + colorSurcharge + finishSurcharge;
+  const vatAmount = inputs.includeVat ? netPrice * (inputs.vatPercent / 100) : 0;
+  const grossPrice = netPrice + vatAmount;
   const unitPrice = grossPrice / quantity;
 
   return {
@@ -122,6 +120,35 @@ export function calculatePrice(inputs: PricingInputs): PriceBreakdown {
   };
 }
 
+export function applyManualUnitPriceToBreakdown(
+  breakdown: PriceBreakdown,
+  manualUnitPrice: number | undefined,
+  quantity: number,
+  pricing: Pick<PricingInputs, "includeVat" | "vatPercent">,
+): PriceBreakdown {
+  const normalizedManualUnitPrice = normalizeManualUnitPrice(manualUnitPrice);
+  if (!normalizedManualUnitPrice) {
+    return breakdown;
+  }
+  const grossPrice = roundTo(normalizedManualUnitPrice * Math.max(1, quantity), 2);
+  const vatRate = pricing.includeVat ? pricing.vatPercent / 100 : 0;
+  const netPrice = vatRate ? roundTo(grossPrice / (1 + vatRate), 2) : grossPrice;
+  return {
+    ...breakdown,
+    netPrice,
+    vatAmount: grossPrice - netPrice,
+    grossPrice,
+    unitPrice: normalizedManualUnitPrice,
+  };
+}
+
+export function normalizeManualUnitPrice(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return roundTo(value, 2);
+}
+
 export function formatCurrency(value: number): string {
   return new Intl.NumberFormat("it-IT", {
     style: "currency",
@@ -139,8 +166,4 @@ export function formatNumber(value: number, digits = 1): string {
 function roundTo(value: number, digits: number): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
-}
-
-function roundFinalPrice(value: number): number {
-  return Math.round(value);
 }

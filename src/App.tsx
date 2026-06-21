@@ -11,7 +11,6 @@ import {
   Package,
   Palette,
   PlusCircle,
-  Printer,
   ReceiptText,
   Save,
   Sparkles,
@@ -25,10 +24,12 @@ import {
   DEFAULT_PRICING,
   PRINTER_PROFILE,
   SURCHARGES,
+  applyManualUnitPriceToBreakdown,
   calculatePrice,
   formatCurrency,
   formatNumber,
   getMaterial,
+  normalizeManualUnitPrice,
   suggestPricingFromMetrics,
 } from "./lib/pricing";
 import { openOrderQuote, openQuote } from "./lib/quote";
@@ -72,6 +73,7 @@ function App() {
   const [quoteItems, setQuoteItems] = useState<QuoteItem[]>([]);
   const [itemName, setItemName] = useState("Stampa personalizzata");
   const [pricing, setPricing] = useState<PricingInputs>(DEFAULT_PRICING);
+  const [manualQuoteUnitPrice, setManualQuoteUnitPrice] = useState<number | undefined>();
   const [customer, setCustomer] = useState<Customer>(EMPTY_CUSTOMER);
   const [customerNumber, setCustomerNumber] = useState("");
   const [notes, setNotes] = useState("Validita preventivo: 15 giorni. Bianco e nero inclusi nel prezzo base.");
@@ -119,16 +121,23 @@ function App() {
         color: item.color ?? pricing.color,
         finish: item.finish ?? pricing.finish,
       });
+      const manualUnitPrice = getQuoteItemManualUnitPrice(item);
       return {
         item,
-        breakdown: applyManualPriceToBreakdown(automaticBreakdown, item.manualPrice, item.quantity, pricing),
+        automaticBreakdown,
+        manualUnitPrice,
+        breakdown: applyManualUnitPriceToBreakdown(automaticBreakdown, manualUnitPrice, item.quantity, pricing),
       };
     });
+    const automaticBreakdown = calculatePrice(pricing);
     return {
       rows,
-      breakdown: rows.length ? combinePriceBreakdowns(rows.map((row) => row.breakdown)) : calculatePrice(pricing),
+      automaticBreakdown,
+      breakdown: rows.length
+        ? combinePriceBreakdowns(rows.map((row) => row.breakdown))
+        : applyManualUnitPriceToBreakdown(automaticBreakdown, manualQuoteUnitPrice, pricing.quantity, pricing),
     };
-  }, [pricing, quoteItems]);
+  }, [manualQuoteUnitPrice, pricing, quoteItems]);
   const breakdown = pricedQuote.breakdown;
   const quoteTotals = useMemo(
     () => ({
@@ -164,6 +173,7 @@ function App() {
     try {
       const results = await Promise.all(files.map((file) => parsePrintFile(file)));
       const newItems = results.map((result, index) => makeQuoteItem(result, files[index].name, pricing));
+      setManualQuoteUnitPrice(undefined);
       setQuoteItems((previous) => [...previous, ...newItems]);
       setParsed(results[0] ?? null);
       setItemName((previous) => {
@@ -258,7 +268,7 @@ function App() {
     }));
   }
 
-  function updateQuoteItem(itemId: string, update: Partial<Pick<QuoteItem, "name" | "quantity" | "manualMinutes" | "filamentGrams" | "manualPrice">>) {
+  function updateQuoteItem(itemId: string, update: Partial<Pick<QuoteItem, "name" | "quantity" | "manualMinutes" | "filamentGrams">>) {
     setQuoteItems((previous) =>
       previous.map((item) => {
         if (item.id !== itemId) {
@@ -267,10 +277,9 @@ function App() {
         const next = {
           ...item,
           ...update,
-          quantity: update.quantity !== undefined ? Math.max(1, update.quantity) : item.quantity,
+          quantity: update.quantity !== undefined ? Math.max(1, Math.round(update.quantity)) : item.quantity,
           manualMinutes: update.manualMinutes !== undefined ? Math.max(1, update.manualMinutes) : item.manualMinutes,
           filamentGrams: update.filamentGrams !== undefined ? Math.max(1, update.filamentGrams) : item.filamentGrams,
-          manualPrice: update.manualPrice !== undefined ? normalizeManualPrice(update.manualPrice) : item.manualPrice,
         };
         return {
           ...next,
@@ -285,14 +294,35 @@ function App() {
     );
   }
 
+  function updateQuoteItemManualUnitPrice(itemId: string, manualUnitPrice: number | undefined) {
+    setQuoteItems((previous) =>
+      previous.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              manualUnitPrice: normalizeManualUnitPrice(manualUnitPrice),
+              manualPrice: undefined,
+            }
+          : item,
+      ),
+    );
+  }
+
   function deleteQuoteItem(itemId: string) {
-    setQuoteItems((previous) => previous.filter((item) => item.id !== itemId));
+    const remainingItems = quoteItems.filter((item) => item.id !== itemId);
+    setQuoteItems(remainingItems);
+    if (!remainingItems.length) {
+      setParsed(null);
+      setItemName("Stampa personalizzata");
+      setManualQuoteUnitPrice(undefined);
+    }
   }
 
   function clearQuoteItems() {
     setQuoteItems([]);
     setParsed(null);
     setItemName("Stampa personalizzata");
+    setManualQuoteUnitPrice(undefined);
     patchPricing({
       quantity: DEFAULT_PRICING.quantity,
       manualMinutes: DEFAULT_PRICING.manualMinutes,
@@ -383,10 +413,16 @@ function App() {
     setSelectedProductIds((previous) => previous.filter((id) => id !== productId));
   }
 
-  function updateProductManualPrice(productId: string, manualPrice: number) {
+  function updateProductManualUnitPrice(productId: string, manualUnitPrice: number | undefined) {
     setProducts((previous) =>
       previous.map((product) =>
-        product.id === productId ? { ...product, manualPrice: normalizeManualPrice(manualPrice) } : product,
+        product.id === productId
+          ? {
+              ...product,
+              manualUnitPrice: normalizeManualUnitPrice(manualUnitPrice),
+              manualPrice: undefined,
+            }
+          : product,
       ),
     );
   }
@@ -423,6 +459,7 @@ function App() {
     const firstProduct = productsToApply[0];
     const sameColor = productsToApply.every((product) => product.color === firstProduct.color);
     const sameFinish = productsToApply.every((product) => product.finish === firstProduct.finish);
+    setManualQuoteUnitPrice(undefined);
     setQuoteItems((previous) => [...previous, ...newItems]);
     setParsed({
       metrics: newItems[0].metrics,
@@ -479,162 +516,110 @@ function App() {
       </nav>
 
       {view === "nuovo" && (
-        <section className="quote-grid">
-          <div className="left-rail">
-            <label
-              className={`upload-zone ${dragActive ? "is-active" : ""}`}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragActive(true);
-              }}
-              onDragLeave={() => setDragActive(false)}
-              onDrop={handleDrop}
-            >
-              <input accept=".3mf,.gcode,.gco,.gc" multiple type="file" onChange={handleFileInput} />
-              <Upload size={24} />
-              <span>{isParsing ? "Analisi in corso..." : "Carica uno o piu G-code/3MF"}</span>
-              <small>Puoi selezionare piu file insieme per un unico preventivo</small>
-            </label>
-
-            {quoteItems.length ? (
-              <button className="danger-button full-width" onClick={clearQuoteItems}>
-                <Trash2 size={18} />
-                Elimina tutto
-              </button>
-            ) : null}
-
-            <section className="panel">
-              <PanelTitle icon={<FileArchive size={18} />} title={quoteItems.length ? "Prodotti caricati" : "Dati stampa"} />
-              <div className="metric-list">
-                <TextField label={quoteItems.length ? "Nome preventivo" : "Prodotto / lavorazione"} value={itemName} onChange={setItemName} />
+        <section className="quote-builder">
+          <div className="quote-editor">
+            <section className="panel quote-products-panel">
+              <div className="quote-section-header">
+                <div>
+                  <PanelTitle icon={<FileArchive size={18} />} title="Prodotti del preventivo" />
+                  <p className="muted">Carica piu file insieme oppure aggiungi prodotti frequenti.</p>
+                </div>
                 {quoteItems.length ? (
-                  <>
-                    <div className="quote-summary-strip">
-                      <InfoRow label="File" value={quoteTotals.files.toString()} />
-                      <InfoRow label="Pezzi" value={quoteTotals.quantity.toString()} />
-                      <InfoRow label="Tempo totale" value={`${formatNumber(quoteTotals.minutes)} min`} />
-                      <InfoRow label="Filamento totale" value={`${formatNumber(quoteTotals.grams)} g`} />
-                    </div>
-                    <div className="quote-item-list">
-                      {quoteItems.map((item) => (
-                        <article className="quote-item-card" key={item.id}>
-                          <div className="quote-item-head">
-                            <div>
-                              <strong>{item.name}</strong>
-                              <span>{item.fileName}</span>
-                            </div>
-                            <button className="icon-button danger" title="Elimina prodotto" onClick={() => deleteQuoteItem(item.id)}>
-                              <Trash2 size={17} />
-                            </button>
-                          </div>
-                          <div className="quote-item-fields">
-                            <TextField label="Nome" value={item.name} onChange={(name) => updateQuoteItem(item.id, { name })} />
-                            <NumberField label="Pezzi" min={1} step={1} value={item.quantity} onChange={(quantity) => updateQuoteItem(item.id, { quantity })} />
-                            <NumberField
-                              label="Tempo min"
-                              min={1}
-                              step={5}
-                              value={item.manualMinutes}
-                              onChange={(manualMinutes) => updateQuoteItem(item.id, { manualMinutes })}
-                            />
-                            <NumberField
-                              label="Filamento g"
-                              min={1}
-                              step={1}
-                              value={item.filamentGrams}
-                              onChange={(filamentGrams) => updateQuoteItem(item.id, { filamentGrams })}
-                            />
-                            <NumberField
-                              className="manual-price-field"
-                              label="Prezzo manuale € (0 auto)"
-                              min={0}
-                              step={1}
-                              value={item.manualPrice ?? 0}
-                              onChange={(manualPrice) => updateQuoteItem(item.id, { manualPrice })}
-                            />
-                          </div>
-                          <div className="product-meta">
-                            <span>
-                              <FileArchive size={15} />
-                              {item.kind.toUpperCase()}
-                            </span>
-                            {item.metrics.boundingBox && (
-                              <span>
-                                <Package size={15} />
-                                {formatNumber(item.metrics.boundingBox.x)} x {formatNumber(item.metrics.boundingBox.y)} mm
-                              </span>
-                            )}
-                            {item.metrics.layerCount && (
-                              <span>
-                                <Archive size={15} />
-                                {item.metrics.layerCount} layer
-                              </span>
-                            )}
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </>
-                ) : parsed ? (
-                  <>
-                    <InfoRow label="File" value={parsed.metrics.fileName} />
-                    <InfoRow label="Tipo" value={parsed.metrics.kind.toUpperCase()} />
-                    {parsed.metrics.boundingBox && (
-                      <InfoRow
-                        label="Ingombro"
-                        value={`${formatNumber(parsed.metrics.boundingBox.x)} x ${formatNumber(parsed.metrics.boundingBox.y)} x ${formatNumber(parsed.metrics.boundingBox.z)} mm`}
-                      />
-                    )}
-                    {parsed.metrics.layerCount && <InfoRow label="Layer" value={parsed.metrics.layerCount.toString()} />}
-                  </>
-                ) : (
-                  <p className="muted">Puoi creare un preventivo anche senza file, inserendo minuti e grammi.</p>
-                )}
+                  <button className="danger-button" onClick={clearQuoteItems}>
+                    <Trash2 size={18} />
+                    Elimina tutto
+                  </button>
+                ) : null}
               </div>
-            </section>
 
-            {quoteWarnings.length ? (
-              <section className="panel warning-panel">
-                <PanelTitle icon={<AlertTriangle size={18} />} title="Da controllare" />
-                <ul className="warning-list">
-                  {quoteWarnings.map((warning) => (
-                    <li key={warning}>{warning}</li>
-                  ))}
-                </ul>
-              </section>
-            ) : null}
-          </div>
-
-          <section className="center-stack">
-            <section className="panel locked-panel">
-              <PanelTitle icon={<Lock size={18} />} title="Parametri fissi" />
-              <div className="locked-grid">
-                <LockedItem icon={<Printer size={18} />} label="Stampante" value={PRINTER_PROFILE.name} />
-                <LockedItem icon={<Clock3 size={18} />} label="Potenza nominale" value={`${formatNumber(PRINTER_PROFILE.ratedPowerKw, 2)} kW`} />
-                <LockedItem
-                  icon={<Weight size={18} />}
-                  label="Consumo default"
-                  value={`${formatNumber(PRINTER_PROFILE.averagePowerFactor * 100)}% = ${formatNumber(PRINTER_PROFILE.defaultAveragePowerKw, 2)} kW`}
-                />
-                <LockedItem icon={<Package size={18} />} label="Materiale" value={`${selectedMaterial.name} ${formatCurrency(selectedMaterial.costPerKg)}/kg`} />
-                <LockedItem icon={<Calculator size={18} />} label="Energia" value={`${formatCurrency(PRINTER_PROFILE.energyCostKwh)}/kWh`} />
-                <LockedItem icon={<Lock size={18} />} label="Costo macchina" value={`${formatCurrency(PRINTER_PROFILE.machineRate)}/h`} />
-                <LockedItem icon={<Sparkles size={18} />} label="Guadagno" value="125% sulle spese vive" />
+              <div className="quote-top-controls">
+                <TextField label="Nome preventivo" value={itemName} onChange={setItemName} />
+                <label
+                  className={`quote-upload-button ${dragActive ? "is-active" : ""}`}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    setDragActive(true);
+                  }}
+                  onDragLeave={() => setDragActive(false)}
+                  onDrop={handleDrop}
+                >
+                  <input accept=".3mf,.gcode,.gco,.gc" multiple type="file" onChange={handleFileInput} />
+                  <Upload size={18} />
+                  <span>{isParsing ? "Analisi in corso..." : "Aggiungi G-code / 3MF"}</span>
+                </label>
               </div>
-            </section>
 
-            <section className="panel">
-              <PanelTitle icon={<Calculator size={18} />} title="Preventivo" />
-              <div className="form-grid compact">
-                {quoteItems.length ? (
-                  <div className="quote-total-summary wide-field">
-                    <InfoRow label="Prodotti" value={`${quoteTotals.files} file / ${quoteTotals.quantity} pz`} />
+              {quoteItems.length ? (
+                <>
+                  <div className="quote-overview">
+                    <InfoRow label="Prodotti" value={quoteTotals.files.toString()} />
+                    <InfoRow label="Pezzi" value={quoteTotals.quantity.toString()} />
                     <InfoRow label="Tempo totale" value={`${formatNumber(quoteTotals.minutes)} min`} />
-                    <InfoRow label="Filamento totale" value={`${formatNumber(quoteTotals.grams)} g`} />
+                    <InfoRow label="Filamento" value={`${formatNumber(quoteTotals.grams)} g`} />
                   </div>
-                ) : (
-                  <>
-                    <NumberField label="Quantita" min={1} step={1} value={pricing.quantity} onChange={(quantity) => patchPricing({ quantity })} />
+                  <div className="quote-lines">
+                    {pricedQuote.rows.map((row) => (
+                      <article className="quote-line" key={row.item.id}>
+                        <div className="quote-line-product">
+                          <TextField label="Prodotto" value={row.item.name} onChange={(name) => updateQuoteItem(row.item.id, { name })} />
+                          <small>
+                            {row.item.fileName} · {row.item.kind.toUpperCase()}
+                          </small>
+                        </div>
+                        <NumberField
+                          label="Quantita"
+                          min={1}
+                          step={1}
+                          value={row.item.quantity}
+                          onChange={(quantity) => updateQuoteItem(row.item.id, { quantity })}
+                        />
+                        <NumberField
+                          label="Tempo min"
+                          min={1}
+                          step={5}
+                          value={row.item.manualMinutes}
+                          onChange={(manualMinutes) => updateQuoteItem(row.item.id, { manualMinutes })}
+                        />
+                        <NumberField
+                          label="Filamento g"
+                          min={1}
+                          step={1}
+                          value={row.item.filamentGrams}
+                          onChange={(filamentGrams) => updateQuoteItem(row.item.id, { filamentGrams })}
+                        />
+                        <CurrencyField
+                          label="Prezzo unitario manuale"
+                          placeholder={`Auto ${formatCurrency(row.automaticBreakdown.unitPrice)}`}
+                          value={row.manualUnitPrice}
+                          onChange={(manualUnitPrice) => updateQuoteItemManualUnitPrice(row.item.id, manualUnitPrice)}
+                        />
+                        <div className="quote-line-total">
+                          <span>Totale riga</span>
+                          <strong>{formatCurrency(row.breakdown.grossPrice)}</strong>
+                          <small>
+                            {row.manualUnitPrice
+                              ? `${formatCurrency(row.manualUnitPrice)} cad. manuale`
+                              : `${formatCurrency(row.automaticBreakdown.unitPrice)} cad. automatico`}
+                          </small>
+                        </div>
+                        <button className="icon-button danger" title="Elimina prodotto" onClick={() => deleteQuoteItem(row.item.id)}>
+                          <Trash2 size={17} />
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="manual-quote-editor">
+                  <p className="muted">Preventivo manuale: inserisci i dati oppure carica uno o piu file.</p>
+                  <div className="manual-quote-grid">
+                    <NumberField
+                      label="Quantita"
+                      min={1}
+                      step={1}
+                      value={pricing.quantity}
+                      onChange={(quantity) => patchPricing({ quantity: Math.max(1, Math.round(quantity)) })}
+                    />
                     <NumberField
                       label="Tempo stampa min"
                       min={1}
@@ -649,8 +634,99 @@ function App() {
                       value={pricing.filamentGrams}
                       onChange={(filamentGrams) => patchPricing({ filamentGrams })}
                     />
+                    <CurrencyField
+                      label="Prezzo unitario manuale"
+                      placeholder={`Auto ${formatCurrency(pricedQuote.automaticBreakdown.unitPrice)}`}
+                      value={manualQuoteUnitPrice}
+                      onChange={(value) => setManualQuoteUnitPrice(normalizeManualUnitPrice(value))}
+                    />
+                    <div className="quote-line-total">
+                      <span>Totale</span>
+                      <strong>{formatCurrency(breakdown.grossPrice)}</strong>
+                      <small>{formatCurrency(breakdown.unitPrice)} cad.</small>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {quoteWarnings.length ? (
+              <section className="panel warning-panel">
+                <PanelTitle icon={<AlertTriangle size={18} />} title="Da controllare" />
+                <ul className="warning-list">
+                  {quoteWarnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+
+            <div className="quote-lower-grid">
+              <section className="panel locked-panel">
+                <PanelTitle icon={<Lock size={18} />} title="Parametri fissi" />
+                <div className="fixed-facts">
+                  <InfoRow label="Stampante" value={PRINTER_PROFILE.name} />
+                  <InfoRow label="Potenza nominale" value={`${formatNumber(PRINTER_PROFILE.ratedPowerKw, 2)} kW`} />
+                  <InfoRow
+                    label="Consumo default"
+                    value={`${formatNumber(PRINTER_PROFILE.averagePowerFactor * 100)}% = ${formatNumber(PRINTER_PROFILE.defaultAveragePowerKw, 2)} kW`}
+                  />
+                  <InfoRow label="Materiale" value={`${selectedMaterial.name} ${formatCurrency(selectedMaterial.costPerKg)}/kg`} />
+                  <InfoRow label="Energia" value={`${formatCurrency(PRINTER_PROFILE.energyCostKwh)}/kWh`} />
+                  <InfoRow label="Costo macchina" value={`${formatCurrency(PRINTER_PROFILE.machineRate)}/h`} />
+                  <InfoRow label="Guadagno" value="125% sulle spese vive" />
+                </div>
+              </section>
+
+              <section className="panel">
+                <PanelTitle icon={<UserRound size={18} />} title="Cliente" />
+                <div className="form-grid">
+                  <TextField label="Nome cliente" value={customer.name} onChange={(name) => setCustomer((previous) => ({ ...previous, name }))} />
+                  <TextField label="Numero cliente" value={customerNumber} onChange={setCustomerNumber} />
+                  <TextField label="Telefono" value={customer.phone} onChange={(phone) => setCustomer((previous) => ({ ...previous, phone }))} />
+                  <TextField label="Email" value={customer.email} onChange={(email) => setCustomer((previous) => ({ ...previous, email }))} />
+                  <label className="wide-field">
+                    Note
+                    <textarea value={notes} rows={3} onChange={(event) => setNotes(event.target.value)} />
+                  </label>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <aside className="quote-sidebar">
+            <section className="panel total-panel">
+              <div className="total-row">
+                <span>Prezzo finale</span>
+                <strong>{formatCurrency(breakdown.grossPrice)}</strong>
+              </div>
+              <div className="breakdown">
+                {quoteItems.length ? (
+                  <>
+                    <InfoRow label="Prodotti" value={`${quoteTotals.files} file / ${quoteTotals.quantity} pz`} />
+                    {pricedQuote.rows.map((row) => (
+                      <InfoRow
+                        key={row.item.id}
+                        label={`${row.item.quantity} x ${row.item.name}${row.manualUnitPrice ? " (manuale)" : ""}`}
+                        value={formatCurrency(row.breakdown.grossPrice)}
+                      />
+                    ))}
                   </>
-                )}
+                ) : null}
+                <InfoRow label="Materiale PLA" value={formatCurrency(breakdown.materialCost)} />
+                <InfoRow label={`Energia ${formatNumber(pricing.powerKw, 2)} kW`} value={formatCurrency(breakdown.energyCost)} />
+                <InfoRow label="Macchina" value={formatCurrency(breakdown.machineCost)} />
+                <InfoRow label="Spese vive" value={formatCurrency(breakdown.subtotalCost)} />
+                <InfoRow label="Guadagno 125%" value={formatCurrency(breakdown.marginAmount)} />
+                {breakdown.colorSurcharge > 0 && <InfoRow label="Colore" value={formatCurrency(breakdown.colorSurcharge)} />}
+                {breakdown.finishSurcharge > 0 && <InfoRow label="Effetto pietra" value={formatCurrency(breakdown.finishSurcharge)} />}
+                {!quoteItems.length && pricing.quantity > 1 && <InfoRow label="Prezzo unitario" value={formatCurrency(breakdown.unitPrice)} />}
+              </div>
+            </section>
+
+            <section className="panel quote-options-panel">
+              <PanelTitle icon={<Calculator size={18} />} title="Opzioni preventivo" />
+              <div className="quote-options-grid">
                 <NumberField
                   label="Potenza media misurata kW"
                   min={0.01}
@@ -670,7 +746,7 @@ function App() {
                   label={`Effetto pietra + ${formatCurrency(SURCHARGES.stoneEffect)}`}
                   onChange={(checked) => patchPricing({ finish: checked ? "Effetto pietra" : "Standard" })}
                 />
-                <label className="toggle-row">
+                <label className="toggle-row compact-toggle">
                   <input
                     checked={pricing.includeVat}
                     type="checkbox"
@@ -678,47 +754,6 @@ function App() {
                   />
                   Applica IVA {pricing.vatPercent}%
                 </label>
-              </div>
-            </section>
-
-            <section className="panel">
-              <PanelTitle icon={<UserRound size={18} />} title="Cliente" />
-              <div className="form-grid">
-                <TextField label="Nome cliente" value={customer.name} onChange={(name) => setCustomer((previous) => ({ ...previous, name }))} />
-                <TextField label="Numero cliente" value={customerNumber} onChange={setCustomerNumber} />
-                <TextField label="Telefono" value={customer.phone} onChange={(phone) => setCustomer((previous) => ({ ...previous, phone }))} />
-                <TextField label="Email" value={customer.email} onChange={(email) => setCustomer((previous) => ({ ...previous, email }))} />
-                <label className="wide-field">
-                  Note
-                  <textarea value={notes} rows={3} onChange={(event) => setNotes(event.target.value)} />
-                </label>
-              </div>
-            </section>
-          </section>
-
-          <aside className="right-rail">
-            <section className="panel total-panel">
-              <div className="total-row">
-                <span>Prezzo finale</span>
-                <strong>{formatCurrency(breakdown.grossPrice)}</strong>
-              </div>
-              <div className="breakdown">
-                {quoteItems.length ? (
-                  <>
-                    <InfoRow label="Prodotti" value={`${quoteTotals.files} file / ${quoteTotals.quantity} pz`} />
-                    {pricedQuote.rows.map((row) => (
-                      <InfoRow key={row.item.id} label={`${row.item.quantity} x ${row.item.name}`} value={formatCurrency(row.breakdown.grossPrice)} />
-                    ))}
-                  </>
-                ) : null}
-                <InfoRow label="Materiale PLA" value={formatCurrency(breakdown.materialCost)} />
-                <InfoRow label={`Energia ${formatNumber(pricing.powerKw, 2)} kW`} value={formatCurrency(breakdown.energyCost)} />
-                <InfoRow label="Macchina" value={formatCurrency(breakdown.machineCost)} />
-                <InfoRow label="Spese vive" value={formatCurrency(breakdown.subtotalCost)} />
-                <InfoRow label="Guadagno 125%" value={formatCurrency(breakdown.marginAmount)} />
-                {breakdown.colorSurcharge > 0 && <InfoRow label="Colore" value={formatCurrency(breakdown.colorSurcharge)} />}
-                {breakdown.finishSurcharge > 0 && <InfoRow label="Effetto pietra" value={formatCurrency(breakdown.finishSurcharge)} />}
-                {pricing.quantity > 1 && <InfoRow label="Prezzo unitario" value={formatCurrency(breakdown.unitPrice)} />}
               </div>
             </section>
 
@@ -889,14 +924,29 @@ function App() {
                 min={1}
                 step={1}
                 value={productDraft.defaultQuantity}
-                onChange={(defaultQuantity) => setProductDraft((previous) => ({ ...previous, defaultQuantity }))}
+                onChange={(defaultQuantity) =>
+                  setProductDraft((previous) => ({
+                    ...previous,
+                    defaultQuantity: Math.max(1, Math.round(defaultQuantity)),
+                  }))
+                }
               />
-              <NumberField
-                label="Prezzo manuale € (0 auto)"
-                min={0}
-                step={1}
-                value={productDraft.manualPrice ?? 0}
-                onChange={(manualPrice) => setProductDraft((previous) => ({ ...previous, manualPrice: normalizeManualPrice(manualPrice) }))}
+              <CurrencyField
+                label="Prezzo unitario manuale"
+                placeholder="Vuoto = automatico"
+                value={normalizeManualUnitPrice(
+                  productDraft.manualUnitPrice
+                    ?? (productDraft.manualPrice
+                      ? productDraft.manualPrice / Math.max(1, productDraft.defaultQuantity)
+                      : undefined),
+                )}
+                onChange={(manualUnitPrice) =>
+                  setProductDraft((previous) => ({
+                    ...previous,
+                    manualUnitPrice: normalizeManualUnitPrice(manualUnitPrice),
+                    manualPrice: undefined,
+                  }))
+                }
               />
               <ToggleOption
                 checked={productDraft.color === "Colore"}
@@ -994,12 +1044,11 @@ function App() {
                           value={`${formatNumber(product.boundingBox.x)} x ${formatNumber(product.boundingBox.y)} x ${formatNumber(product.boundingBox.z)} mm`}
                         />
                       )}
-                      <NumberField
-                        label="Prezzo manuale € (0 auto)"
-                        min={0}
-                        step={1}
-                        value={product.manualPrice ?? 0}
-                        onChange={(manualPrice) => updateProductManualPrice(product.id, manualPrice)}
+                      <CurrencyField
+                        label="Prezzo unitario manuale"
+                        placeholder={`Auto ${formatCurrency(calculateAutomaticProductPrice(product).unitPrice)}`}
+                        value={getFrequentProductManualUnitPrice(product)}
+                        onChange={(manualUnitPrice) => updateProductManualUnitPrice(product.id, manualUnitPrice)}
                       />
                     </div>
                     {product.notes && <p>{product.notes}</p>}
@@ -1081,16 +1130,6 @@ function ToggleOption({
   );
 }
 
-function LockedItem({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
-  return (
-    <div className="locked-item">
-      {icon}
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
 function NumberField({
   className,
   label,
@@ -1106,6 +1145,15 @@ function NumberField({
   step: number;
   onChange: (value: number) => void;
 }) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    const parsed = Number(draft);
+    if (draft.trim() && parsed !== value) {
+      setDraft(String(value));
+    }
+  }, [value]);
+
   return (
     <label className={className}>
       {label}
@@ -1113,8 +1161,70 @@ function NumberField({
         min={min}
         step={step}
         type="number"
-        value={Number.isFinite(value) ? value : 0}
-        onChange={(event) => onChange(Number(event.target.value))}
+        value={draft}
+        onBlur={() => {
+          const parsed = Number(draft);
+          if (!draft.trim() || !Number.isFinite(parsed)) {
+            setDraft(String(value));
+            return;
+          }
+          const normalized = Math.max(min, parsed);
+          setDraft(String(normalized));
+          onChange(normalized);
+        }}
+        onChange={(event) => {
+          const next = event.target.value;
+          setDraft(next);
+          if (!next.trim()) {
+            return;
+          }
+          const parsed = Number(next);
+          if (Number.isFinite(parsed)) {
+            onChange(parsed);
+          }
+        }}
+      />
+    </label>
+  );
+}
+
+function CurrencyField({
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  value: number | undefined;
+  placeholder?: string;
+  onChange: (value: number | undefined) => void;
+}) {
+  const [draft, setDraft] = useState(() => formatCurrencyInput(value));
+
+  useEffect(() => {
+    if (parseCurrencyInput(draft) !== value) {
+      setDraft(formatCurrencyInput(value));
+    }
+  }, [value]);
+
+  return (
+    <label>
+      {label}
+      <input
+        inputMode="decimal"
+        placeholder={placeholder}
+        type="text"
+        value={draft}
+        onBlur={() => {
+          const normalized = normalizeManualUnitPrice(parseCurrencyInput(draft));
+          setDraft(formatCurrencyInput(normalized));
+          onChange(normalized);
+        }}
+        onChange={(event) => {
+          const next = sanitizeCurrencyInput(event.target.value);
+          setDraft(next);
+          onChange(normalizeManualUnitPrice(parseCurrencyInput(next)));
+        }}
       />
     </label>
   );
@@ -1180,7 +1290,7 @@ function makeProductQuoteItem(product: FrequentProduct): QuoteItem {
     quantity: product.defaultQuantity,
     manualMinutes: product.defaultMinutes,
     filamentGrams: product.defaultGrams,
-    manualPrice: product.manualPrice,
+    manualUnitPrice: getFrequentProductManualUnitPrice(product),
     color: product.color,
     finish: product.finish,
     metrics: {
@@ -1238,37 +1348,47 @@ function combinePriceBreakdowns(breakdowns: PriceBreakdown[]): PriceBreakdown {
   };
 }
 
-function applyManualPriceToBreakdown(
-  breakdown: PriceBreakdown,
-  manualPrice: number | undefined,
-  quantity: number,
-  pricing: PricingInputs,
-): PriceBreakdown {
-  const normalizedManualPrice = normalizeManualPrice(manualPrice ?? 0);
-  if (!normalizedManualPrice) {
-    return breakdown;
-  }
-  const vatRate = pricing.includeVat ? pricing.vatPercent / 100 : 0;
-  const netPrice = vatRate ? roundMoney(normalizedManualPrice / (1 + vatRate)) : normalizedManualPrice;
-  const vatAmount = normalizedManualPrice - netPrice;
-  return {
-    ...breakdown,
-    netPrice,
-    vatAmount,
-    grossPrice: normalizedManualPrice,
-    unitPrice: normalizedManualPrice / Math.max(1, quantity),
-  };
+function getQuoteItemManualUnitPrice(item: QuoteItem): number | undefined {
+  return normalizeManualUnitPrice(
+    item.manualUnitPrice ?? (item.manualPrice ? item.manualPrice / Math.max(1, item.quantity) : undefined),
+  );
 }
 
-function normalizeManualPrice(value: number): number | undefined {
-  if (!Number.isFinite(value) || value <= 0) {
+function getFrequentProductManualUnitPrice(product: FrequentProduct): number | undefined {
+  return normalizeManualUnitPrice(
+    product.manualUnitPrice
+      ?? (product.manualPrice ? product.manualPrice / Math.max(1, product.defaultQuantity) : undefined),
+  );
+}
+
+function sanitizeCurrencyInput(value: string): string {
+  const cleaned = value.replaceAll(".", ",").replace(/[^0-9,]/g, "");
+  const [whole = "", ...decimalParts] = cleaned.split(",");
+  const decimals = decimalParts.join("").slice(0, 2);
+  if (!cleaned.includes(",")) {
+    return whole;
+  }
+  return `${whole || "0"},${decimals}`;
+}
+
+function parseCurrencyInput(value: string): number | undefined {
+  const normalized = value.trim().replace(",", ".");
+  if (!normalized || normalized === ".") {
     return undefined;
   }
-  return Math.round(value);
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function roundMoney(value: number): number {
-  return Math.round(value * 100) / 100;
+function formatCurrencyInput(value: number | undefined): string {
+  if (!value) {
+    return "";
+  }
+  return new Intl.NumberFormat("it-IT", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    useGrouping: false,
+  }).format(value);
 }
 
 function stripFileExtension(fileName: string): string {
@@ -1276,7 +1396,17 @@ function stripFileExtension(fileName: string): string {
 }
 
 function calculateProductPrice(product: FrequentProduct): number {
-  const automaticBreakdown = calculatePrice({
+  const automaticBreakdown = calculateAutomaticProductPrice(product);
+  return applyManualUnitPriceToBreakdown(
+    automaticBreakdown,
+    getFrequentProductManualUnitPrice(product),
+    product.defaultQuantity,
+    DEFAULT_PRICING,
+  ).grossPrice;
+}
+
+function calculateAutomaticProductPrice(product: FrequentProduct): PriceBreakdown {
+  return calculatePrice({
     ...DEFAULT_PRICING,
     quantity: product.defaultQuantity,
     manualMinutes: product.defaultMinutes,
@@ -1284,7 +1414,6 @@ function calculateProductPrice(product: FrequentProduct): number {
     color: product.color,
     finish: product.finish,
   });
-  return applyManualPriceToBreakdown(automaticBreakdown, product.manualPrice, product.defaultQuantity, DEFAULT_PRICING).grossPrice;
 }
 
 export default App;

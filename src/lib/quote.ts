@@ -1,5 +1,14 @@
 import type { Customer, Order, PriceBreakdown, PricingInputs, PrintMetrics, QuoteItem } from "../types";
-import { DEFAULT_PRICING, PRINTER_PROFILE, calculatePrice, formatCurrency, formatNumber, getMaterial } from "./pricing";
+import {
+  DEFAULT_PRICING,
+  PRINTER_PROFILE,
+  applyManualUnitPriceToBreakdown,
+  calculatePrice,
+  formatCurrency,
+  formatNumber,
+  getMaterial,
+  normalizeManualUnitPrice,
+} from "./pricing";
 
 type QuoteLinePayload = {
   item: QuoteItem;
@@ -172,15 +181,17 @@ function buildSavedOrderHtml(order: Order): string {
 
 function buildQuoteItemRows(items: QuoteLinePayload[], materialName: string, pricing: PricingInputs): string {
   return items
-    .map(
-      ({ item, breakdown }) => `
+    .map(({ item, breakdown }) => {
+      const manualUnitPrice = item.manualUnitPrice
+        ?? (item.manualPrice ? item.manualPrice / Math.max(1, item.quantity) : undefined);
+      return `
         <tr>
           <td>${escapeHtml(item.name)}</td>
-          <td>${item.quantity} pz, ${materialName}, ${escapeHtml(item.color ?? pricing.color)}, ${escapeHtml(item.finish ?? pricing.finish)}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad., ${formatNumber(pricing.powerKw, 2)} kW medi</td>
+          <td>${item.quantity} pz, ${materialName}, ${escapeHtml(item.color ?? pricing.color)}, ${escapeHtml(item.finish ?? pricing.finish)}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad., ${formatNumber(pricing.powerKw, 2)} kW medi${manualUnitPrice ? `, prezzo unitario manuale ${formatCurrency(manualUnitPrice)}` : ""}</td>
           <td class="num">${formatCurrency(breakdown.netPrice)}</td>
         </tr>
-      `,
-    )
+      `;
+    })
     .join("");
 }
 
@@ -207,17 +218,20 @@ function buildSavedOrderItemRows(order: Order): string {
         finish: item.finish ?? pricing.finish,
         includeVat: false,
       });
-      const visiblePrice =
-        item.manualPrice && item.manualPrice > 0
-          ? order.includeVat
-            ? Math.round((item.manualPrice / (1 + (order.vatPercent ?? 22) / 100)) * 100) / 100
-            : item.manualPrice
-          : lineBreakdown.netPrice;
-      return `
+      const manualUnitPrice = normalizeManualUnitPrice(
+        item.manualUnitPrice ?? (item.manualPrice ? item.manualPrice / Math.max(1, item.quantity) : undefined),
+      );
+      const visibleBreakdown = applyManualUnitPriceToBreakdown(
+        lineBreakdown,
+        manualUnitPrice,
+        item.quantity,
+        { includeVat: Boolean(order.includeVat), vatPercent: order.vatPercent ?? 22 },
+      );
+          return `
         <tr>
           <td>${escapeHtml(item.name)}</td>
-          <td>${item.quantity} pz, ${getMaterial(order.materialKey).name}, ${escapeHtml(item.color ?? order.color ?? "Bianco")}, ${escapeHtml(item.finish ?? order.finish ?? "Standard")}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad.</td>
-          <td class="num">${formatCurrency(visiblePrice)}</td>
+          <td>${item.quantity} pz, ${getMaterial(order.materialKey).name}, ${escapeHtml(item.color ?? order.color ?? "Bianco")}, ${escapeHtml(item.finish ?? order.finish ?? "Standard")}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad.${manualUnitPrice ? `, prezzo unitario manuale ${formatCurrency(manualUnitPrice)}` : ""}</td>
+          <td class="num">${formatCurrency(visibleBreakdown.netPrice)}</td>
         </tr>
       `;
     })
