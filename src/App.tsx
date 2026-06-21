@@ -32,7 +32,6 @@ import {
   normalizeManualUnitPrice,
   suggestPricingFromMetrics,
 } from "./lib/pricing";
-import { openOrderQuote, openQuote } from "./lib/quote";
 import { loadOrders, loadProducts, makeOrderId, makeQuoteNumber, saveOrders, saveProducts } from "./lib/storage";
 import type {
   Customer,
@@ -368,7 +367,8 @@ function App() {
     setOrders((previous) => previous.filter((order) => order.id !== orderId));
   }
 
-  function generateQuote() {
+  async function generateQuote() {
+    const { openQuote } = await import("./lib/quote");
     openQuote({
       quoteNumber: makeQuoteNumber(),
       customer,
@@ -379,6 +379,11 @@ function App() {
       items: pricedQuote.rows,
       notes,
     });
+  }
+
+  async function generateOrderQuote(order: Order) {
+    const { openOrderQuote } = await import("./lib/quote");
+    openOrderQuote(order);
   }
 
   function saveFrequentProduct() {
@@ -778,9 +783,9 @@ function App() {
             </section>
 
             <section className="panel action-panel">
-              <button className="primary-button" onClick={generateQuote}>
+              <button className="primary-button" onClick={() => void generateQuote()}>
                 <ReceiptText size={18} />
-                Preventivo
+                Crea PDF
               </button>
               <button className="secondary-button" onClick={() => saveCurrentOrder("Bozza")}>
                 <Save size={18} />
@@ -845,7 +850,7 @@ function App() {
                     ))}
                   </select>
                   <div className="row-actions">
-                    <button title="Apri preventivo" onClick={() => openOrderQuote(order)}>
+                    <button title="Scarica preventivo PDF" onClick={() => void generateOrderQuote(order)}>
                       <FileText size={17} />
                     </button>
                     <button title="Elimina ordine" onClick={() => deleteOrder(order.id)}>

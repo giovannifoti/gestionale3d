@@ -1,12 +1,11 @@
+import { jsPDF } from "jspdf";
+import { autoTable } from "jspdf-autotable";
 import type { Customer, Order, PriceBreakdown, PricingInputs, PrintMetrics, QuoteItem } from "../types";
 import {
   DEFAULT_PRICING,
   PRINTER_PROFILE,
   applyManualUnitPriceToBreakdown,
   calculatePrice,
-  formatCurrency,
-  formatNumber,
-  getMaterial,
   normalizeManualUnitPrice,
 } from "./pricing";
 
@@ -26,226 +25,266 @@ type QuotePayload = {
   notes: string;
 };
 
-export function openQuote(payload: QuotePayload): void {
-  const popup = window.open("", "_blank", "width=900,height=1100");
-  if (!popup) {
-    return;
-  }
+type PdfLine = {
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+};
 
-  popup.document.write(buildQuoteHtml(payload));
-  popup.document.close();
-  popup.focus();
-  window.setTimeout(() => popup.print(), 400);
+type PdfPayload = {
+  quoteNumber: string;
+  date: string;
+  customer: Customer;
+  customerNumber: string;
+  lines: PdfLine[];
+  netPrice: number;
+  vatAmount: number;
+  grossPrice: number;
+  includeVat: boolean;
+  vatPercent: number;
+  notes: string;
+};
+
+const COLORS = {
+  navy: [16, 40, 72] as [number, number, number],
+  blue: [29, 111, 216] as [number, number, number],
+  paleBlue: [234, 242, 255] as [number, number, number],
+  border: [215, 226, 238] as [number, number, number],
+  text: [23, 32, 42] as [number, number, number],
+  muted: [100, 115, 134] as [number, number, number],
+  white: [255, 255, 255] as [number, number, number],
+};
+
+export function openQuote(payload: QuotePayload): void {
+  const document = createQuotePdfDocument(payload);
+  document.save(`${safeFileName(payload.quoteNumber)}.pdf`);
 }
 
 export function openOrderQuote(order: Order): void {
-  const popup = window.open("", "_blank", "width=900,height=1100");
-  if (!popup) {
-    return;
+  const document = createOrderQuotePdfDocument(order);
+  document.save(`${safeFileName(order.quoteNumber)}.pdf`);
+}
+
+export function createQuotePdfDocument(payload: QuotePayload): jsPDF {
+  const lines = payload.items?.length
+    ? payload.items.map(({ item, breakdown }) => ({
+        name: item.name,
+        quantity: item.quantity,
+        unitPrice: breakdown.netPrice / Math.max(1, item.quantity),
+        totalPrice: breakdown.netPrice,
+      }))
+    : [
+        {
+          name: payload.metrics.fileName || "Stampa 3D",
+          quantity: payload.pricing.quantity,
+          unitPrice: payload.breakdown.netPrice / Math.max(1, payload.pricing.quantity),
+          totalPrice: payload.breakdown.netPrice,
+        },
+      ];
+
+  return createPdf({
+    quoteNumber: payload.quoteNumber,
+    date: new Date().toLocaleDateString("it-IT"),
+    customer: payload.customer,
+    customerNumber: payload.customerNumber,
+    lines,
+    netPrice: payload.breakdown.netPrice,
+    vatAmount: payload.breakdown.vatAmount,
+    grossPrice: payload.breakdown.grossPrice,
+    includeVat: payload.pricing.includeVat,
+    vatPercent: payload.pricing.vatPercent,
+    notes: payload.notes,
+  });
+}
+
+export function createOrderQuotePdfDocument(order: Order): jsPDF {
+  const lines = order.items?.length ? buildSavedOrderLines(order) : [buildSavedOrderSingleLine(order)];
+  return createPdf({
+    quoteNumber: order.quoteNumber,
+    date: new Date(order.createdAt).toLocaleDateString("it-IT"),
+    customer: order.customer,
+    customerNumber: order.customerNumber,
+    lines,
+    netPrice: order.netPrice,
+    vatAmount: order.grossPrice - order.netPrice,
+    grossPrice: order.grossPrice,
+    includeVat: Boolean(order.includeVat),
+    vatPercent: order.vatPercent ?? 22,
+    notes: order.notes,
+  });
+}
+
+function createPdf(payload: PdfPayload): jsPDF {
+  const document = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const pageWidth = document.internal.pageSize.getWidth();
+  const margin = 18;
+
+  document.setProperties({
+    title: `Preventivo ${payload.quoteNumber}`,
+    subject: "Preventivo stampa 3D",
+    author: "",
+    creator: "",
+  });
+
+  document.setFillColor(...COLORS.navy);
+  document.rect(0, 0, pageWidth, 44, "F");
+  document.setTextColor(...COLORS.white);
+  document.setFont("helvetica", "bold");
+  document.setFontSize(9);
+  document.text("PREVENTIVO STAMPA 3D", margin, 16);
+  document.setFontSize(21);
+  document.text(cleanPdfText(payload.quoteNumber), margin, 29);
+  document.setFont("helvetica", "normal");
+  document.setFontSize(10);
+  document.text(payload.date, pageWidth - margin, 20, { align: "right" });
+
+  const customerLines = compactCustomerLines(payload.customer, payload.customerNumber);
+  const customerBoxHeight = Math.max(24, 14 + customerLines.length * 5);
+  const customerY = 52;
+  document.setFillColor(...COLORS.paleBlue);
+  document.setDrawColor(...COLORS.border);
+  document.roundedRect(margin, customerY, pageWidth - margin * 2, customerBoxHeight, 2, 2, "FD");
+  document.setTextColor(...COLORS.blue);
+  document.setFont("helvetica", "bold");
+  document.setFontSize(8);
+  document.text("CLIENTE", margin + 5, customerY + 7);
+  document.setTextColor(...COLORS.text);
+  document.setFont("helvetica", "normal");
+  document.setFontSize(10);
+  document.text(customerLines.map(cleanPdfText), margin + 5, customerY + 13, { lineHeightFactor: 1.25 });
+
+  autoTable(document, {
+    startY: customerY + customerBoxHeight + 9,
+    margin: { left: margin, right: margin },
+    head: [["Prodotto", "Quantita", "Materiale", "Prezzo unitario", "Totale"]],
+    body: payload.lines.map((line) => [
+      cleanPdfText(line.name),
+      line.quantity.toString(),
+      "PLA",
+      formatPdfCurrency(line.unitPrice),
+      formatPdfCurrency(line.totalPrice),
+    ]),
+    theme: "plain",
+    styles: {
+      cellPadding: 4,
+      font: "helvetica",
+      fontSize: 9,
+      lineColor: COLORS.border,
+      lineWidth: { bottom: 0.2 },
+      textColor: COLORS.text,
+      valign: "middle",
+    },
+    headStyles: {
+      fillColor: COLORS.navy,
+      textColor: COLORS.white,
+      fontStyle: "bold",
+      lineWidth: 0,
+    },
+    alternateRowStyles: { fillColor: [248, 251, 255] },
+    columnStyles: {
+      0: { cellWidth: "auto" },
+      1: { cellWidth: 24, halign: "center" },
+      2: { cellWidth: 22, halign: "center" },
+      3: { cellWidth: 34, halign: "right" },
+      4: { cellWidth: 34, halign: "right", fontStyle: "bold" },
+    },
+  });
+
+  const tableEndY = getLastTableY(document);
+  const totalsHeight = payload.includeVat ? 31 : 23;
+  const totalsY = ensureSpace(document, tableEndY + 8, totalsHeight + 34, margin);
+  drawTotals(document, payload, totalsY, pageWidth, margin);
+  drawNotes(document, payload.notes, totalsY + totalsHeight + 10, pageWidth, margin);
+
+  return document;
+}
+
+function drawTotals(document: jsPDF, payload: PdfPayload, y: number, pageWidth: number, margin: number): void {
+  const width = 78;
+  const x = pageWidth - margin - width;
+  const height = payload.includeVat ? 31 : 23;
+  document.setFillColor(...COLORS.paleBlue);
+  document.setDrawColor(...COLORS.border);
+  document.roundedRect(x, y, width, height, 2, 2, "FD");
+  document.setFont("helvetica", "normal");
+  document.setFontSize(9);
+  document.setTextColor(...COLORS.muted);
+  document.text("Subtotale", x + 5, y + 7);
+  document.setTextColor(...COLORS.text);
+  document.text(formatPdfCurrency(payload.netPrice), x + width - 5, y + 7, { align: "right" });
+
+  if (payload.includeVat) {
+    document.setTextColor(...COLORS.muted);
+    document.text(`IVA ${payload.vatPercent}%`, x + 5, y + 14);
+    document.setTextColor(...COLORS.text);
+    document.text(formatPdfCurrency(payload.vatAmount), x + width - 5, y + 14, { align: "right" });
   }
 
-  popup.document.write(buildSavedOrderHtml(order));
-  popup.document.close();
-  popup.focus();
-  window.setTimeout(() => popup.print(), 400);
+  const totalY = payload.includeVat ? y + 24 : y + 16;
+  document.setDrawColor(...COLORS.blue);
+  document.line(x + 5, totalY - 5, x + width - 5, totalY - 5);
+  document.setFont("helvetica", "bold");
+  document.setFontSize(12);
+  document.setTextColor(...COLORS.navy);
+  document.text("TOTALE", x + 5, totalY);
+  document.text(formatPdfCurrency(payload.grossPrice), x + width - 5, totalY, { align: "right" });
 }
 
-function buildQuoteHtml(payload: QuotePayload): string {
-  const material = getMaterial(payload.pricing.materialKey);
-  const date = new Date().toLocaleDateString("it-IT");
-  const customerName = escapeHtml(payload.customer.name || "Cliente");
-  const notes = escapeHtml(payload.notes || "Validita preventivo: 15 giorni. File e parametri da confermare prima della stampa.");
-  const hasItems = Boolean(payload.items?.length);
-
-  return quoteShell({
-    title: `Preventivo ${payload.quoteNumber}`,
-    body: `
-      <header>
-        <div>
-          <p class="eyebrow">Preventivo stampa 3D</p>
-          <h1>${payload.quoteNumber}</h1>
-        </div>
-        <div class="right">
-          <strong>${date}</strong>
-          <span>Gestionale personale</span>
-        </div>
-      </header>
-      <section class="grid">
-        <div>
-          <h2>Cliente</h2>
-          <p>${customerName}</p>
-          <p>Numero cliente: ${escapeHtml(payload.customerNumber || "-")}</p>
-          <p>${escapeHtml(payload.customer.email)}</p>
-          <p>${escapeHtml(payload.customer.phone)}</p>
-        </div>
-        <div>
-          <h2>File</h2>
-          <p>${hasItems ? `${payload.items?.length ?? 0} prodotti caricati` : escapeHtml(payload.metrics.fileName)}</p>
-          <p>${escapeHtml(payload.metrics.kind.toUpperCase())}</p>
-        </div>
-      </section>
-      <table>
-        <thead>
-          <tr>
-            <th>Voce</th>
-            <th>Dettagli</th>
-            <th class="num">Totale</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${
-            payload.items?.length
-              ? buildQuoteItemRows(payload.items, material.name, payload.pricing)
-              : buildSingleQuoteRow(payload.metrics.fileName, payload.pricing, payload.breakdown, material.name)
-          }
-          ${
-            payload.pricing.includeVat
-              ? `<tr><td>IVA</td><td>${payload.pricing.vatPercent}%</td><td class="num">${formatCurrency(payload.breakdown.vatAmount)}</td></tr>`
-              : ""
-          }
-        </tbody>
-        <tfoot>
-          <tr>
-            <td colspan="2">Totale preventivo</td>
-            <td class="num">${formatCurrency(payload.breakdown.grossPrice)}</td>
-          </tr>
-        </tfoot>
-      </table>
-      <section>
-        <h2>Note</h2>
-        <p>${notes}</p>
-      </section>
-    `,
-  });
+function drawNotes(document: jsPDF, notes: string, requestedY: number, pageWidth: number, margin: number): void {
+  const cleanNotes = cleanPdfText(notes.trim());
+  if (!cleanNotes) {
+    return;
+  }
+  const lines = document.splitTextToSize(cleanNotes, pageWidth - margin * 2);
+  const height = 11 + lines.length * 4;
+  const y = ensureSpace(document, requestedY, height, margin);
+  document.setTextColor(...COLORS.blue);
+  document.setFont("helvetica", "bold");
+  document.setFontSize(8);
+  document.text("NOTE", margin, y);
+  document.setTextColor(...COLORS.text);
+  document.setFont("helvetica", "normal");
+  document.setFontSize(9);
+  document.text(lines, margin, y + 6, { lineHeightFactor: 1.3 });
 }
 
-function buildSavedOrderHtml(order: Order): string {
-  const hasItems = Boolean(order.items?.length);
-  return quoteShell({
-    title: `Preventivo ${order.quoteNumber}`,
-    body: `
-      <header>
-        <div>
-          <p class="eyebrow">Preventivo stampa 3D</p>
-          <h1>${escapeHtml(order.quoteNumber)}</h1>
-        </div>
-        <div class="right">
-          <strong>${new Date(order.createdAt).toLocaleDateString("it-IT")}</strong>
-          <span>${escapeHtml(order.status)}</span>
-        </div>
-      </header>
-      <section class="grid">
-        <div>
-          <h2>Cliente</h2>
-          <p>${escapeHtml(order.customer.name || "Cliente")}</p>
-          <p>Numero cliente: ${escapeHtml(order.customerNumber || order.customer.phone || "-")}</p>
-          <p>${escapeHtml(order.customer.email)}</p>
-          <p>${escapeHtml(order.customer.phone)}</p>
-        </div>
-        <div>
-          <h2>File</h2>
-          <p>${hasItems ? `${order.items?.length ?? 0} prodotti caricati` : escapeHtml(order.fileName)}</p>
-          <p>${escapeHtml(order.metrics.kind.toUpperCase())}</p>
-        </div>
-      </section>
-      <table>
-        <thead>
-          <tr>
-            <th>Voce</th>
-            <th>Dettagli</th>
-            <th class="num">Totale</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${order.items?.length ? buildSavedOrderItemRows(order) : buildSavedOrderSingleRow(order)}
-          ${
-            order.includeVat
-              ? `<tr><td>IVA</td><td>${order.vatPercent ?? 22}%</td><td class="num">${formatCurrency(order.grossPrice - order.netPrice)}</td></tr>`
-              : ""
-          }
-        </tbody>
-        <tfoot>
-          <tr>
-            <td colspan="2">Totale preventivo</td>
-            <td class="num">${formatCurrency(order.grossPrice)}</td>
-          </tr>
-        </tfoot>
-      </table>
-      <section>
-        <h2>Note</h2>
-        <p>${escapeHtml(order.notes)}</p>
-      </section>
-    `,
-  });
-}
-
-function buildQuoteItemRows(items: QuoteLinePayload[], materialName: string, pricing: PricingInputs): string {
-  return items
-    .map(({ item, breakdown }) => {
-      const manualUnitPrice = item.manualUnitPrice
-        ?? (item.manualPrice ? item.manualPrice / Math.max(1, item.quantity) : undefined);
-      return `
-        <tr>
-          <td>${escapeHtml(item.name)}</td>
-          <td>${item.quantity} pz, ${materialName}, ${escapeHtml(item.color ?? pricing.color)}, ${escapeHtml(item.finish ?? pricing.finish)}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad., ${formatNumber(pricing.powerKw, 2)} kW medi${manualUnitPrice ? `, prezzo unitario manuale ${formatCurrency(manualUnitPrice)}` : ""}</td>
-          <td class="num">${formatCurrency(breakdown.netPrice)}</td>
-        </tr>
-      `;
-    })
-    .join("");
-}
-
-function buildSingleQuoteRow(fileName: string, pricing: PricingInputs, breakdown: PriceBreakdown, materialName: string): string {
-  return `
-    <tr>
-      <td>${escapeHtml(fileName || "Stampa 3D")}</td>
-      <td>${pricing.quantity} pz, ${materialName}, ${escapeHtml(pricing.color)}, ${escapeHtml(pricing.finish)}, ${PRINTER_PROFILE.name}, ${formatNumber(pricing.manualMinutes / 60, 2)} h, ${formatNumber(pricing.filamentGrams)} g, ${formatNumber(pricing.powerKw, 2)} kW medi, guadagno ${formatNumber(pricing.marginPercent, 0)}%</td>
-      <td class="num">${formatCurrency(breakdown.netPrice)}</td>
-    </tr>
-  `;
-}
-
-function buildSavedOrderItemRows(order: Order): string {
+function buildSavedOrderLines(order: Order): PdfLine[] {
   const pricing = savedOrderPricing(order);
-  return (order.items ?? [])
-    .map((item) => {
-      const lineBreakdown = calculatePrice({
-        ...pricing,
-        quantity: item.quantity,
-        manualMinutes: item.manualMinutes,
-        filamentGrams: item.filamentGrams,
-        color: item.color ?? pricing.color,
-        finish: item.finish ?? pricing.finish,
-        includeVat: false,
-      });
-      const manualUnitPrice = normalizeManualUnitPrice(
-        item.manualUnitPrice ?? (item.manualPrice ? item.manualPrice / Math.max(1, item.quantity) : undefined),
-      );
-      const visibleBreakdown = applyManualUnitPriceToBreakdown(
-        lineBreakdown,
-        manualUnitPrice,
-        item.quantity,
-        { includeVat: Boolean(order.includeVat), vatPercent: order.vatPercent ?? 22 },
-      );
-          return `
-        <tr>
-          <td>${escapeHtml(item.name)}</td>
-          <td>${item.quantity} pz, ${getMaterial(order.materialKey).name}, ${escapeHtml(item.color ?? order.color ?? "Bianco")}, ${escapeHtml(item.finish ?? order.finish ?? "Standard")}, ${PRINTER_PROFILE.name}, ${formatNumber(item.manualMinutes / 60, 2)} h cad., ${formatNumber(item.filamentGrams)} g cad.${manualUnitPrice ? `, prezzo unitario manuale ${formatCurrency(manualUnitPrice)}` : ""}</td>
-          <td class="num">${formatCurrency(visibleBreakdown.netPrice)}</td>
-        </tr>
-      `;
-    })
-    .join("");
+  return (order.items ?? []).map((item) => {
+    const automaticBreakdown = calculatePrice({
+      ...pricing,
+      quantity: item.quantity,
+      manualMinutes: item.manualMinutes,
+      filamentGrams: item.filamentGrams,
+      color: item.color ?? pricing.color,
+      finish: item.finish ?? pricing.finish,
+    });
+    const manualUnitPrice = normalizeManualUnitPrice(
+      item.manualUnitPrice ?? (item.manualPrice ? item.manualPrice / Math.max(1, item.quantity) : undefined),
+    );
+    const breakdown = applyManualUnitPriceToBreakdown(
+      automaticBreakdown,
+      manualUnitPrice,
+      item.quantity,
+      pricing,
+    );
+    return {
+      name: item.name,
+      quantity: item.quantity,
+      unitPrice: breakdown.netPrice / Math.max(1, item.quantity),
+      totalPrice: breakdown.netPrice,
+    };
+  });
 }
 
-function buildSavedOrderSingleRow(order: Order): string {
-  return `
-    <tr>
-      <td>${escapeHtml(order.fileName || "Stampa 3D")}</td>
-      <td>${order.quantity} pz, ${getMaterial(order.materialKey).name}, ${escapeHtml(order.color || "Bianco")}, ${escapeHtml(order.finish || "Standard")}, ${PRINTER_PROFILE.name}, ${formatNumber(order.averagePowerKw ?? PRINTER_PROFILE.defaultAveragePowerKw, 2)} kW medi, guadagno ${formatNumber(order.marginPercent ?? 125, 0)}%</td>
-      <td class="num">${formatCurrency(order.netPrice)}</td>
-    </tr>
-  `;
+function buildSavedOrderSingleLine(order: Order): PdfLine {
+  return {
+    name: order.fileName || "Stampa 3D",
+    quantity: order.quantity,
+    unitPrice: order.netPrice / Math.max(1, order.quantity),
+    totalPrice: order.netPrice,
+  };
 }
 
 function savedOrderPricing(order: Order): PricingInputs {
@@ -266,41 +305,39 @@ function savedOrderPricing(order: Order): PricingInputs {
   };
 }
 
-function quoteShell({ title, body }: { title: string; body: string }): string {
-  return `
-    <!doctype html>
-    <html lang="it">
-      <head>
-        <meta charset="utf-8" />
-        <title>${escapeHtml(title)}</title>
-        <style>
-          @page { margin: 18mm; }
-          * { box-sizing: border-box; }
-          body { color: #1f2522; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; }
-          header { align-items: flex-start; border-bottom: 2px solid #1f2522; display: flex; justify-content: space-between; margin-bottom: 32px; padding-bottom: 22px; }
-          h1 { font-size: 34px; line-height: 1; margin: 6px 0 0; }
-          h2 { font-size: 13px; letter-spacing: .08em; margin: 0 0 10px; text-transform: uppercase; }
-          p { margin: 4px 0; }
-          .eyebrow { color: #087f6a; font-size: 13px; font-weight: 800; letter-spacing: .08em; margin: 0; text-transform: uppercase; }
-          .right { color: #59635e; display: grid; gap: 5px; justify-items: end; }
-          .grid { display: grid; gap: 24px; grid-template-columns: 1fr 1fr; margin-bottom: 28px; }
-          section { margin-bottom: 28px; }
-          table { border-collapse: collapse; width: 100%; }
-          th { background: #edf4f1; color: #4d5a54; font-size: 12px; letter-spacing: .06em; text-align: left; text-transform: uppercase; }
-          th, td { border-bottom: 1px solid #d6ddd8; padding: 14px 12px; vertical-align: top; }
-          tfoot td { border-bottom: 0; font-size: 18px; font-weight: 800; }
-          .num { text-align: right; white-space: nowrap; }
-        </style>
-      </head>
-      <body>${body}</body>
-    </html>
-  `;
+function compactCustomerLines(customer: Customer, customerNumber: string): string[] {
+  return [
+    customer.name || "Cliente",
+    customerNumber ? `Numero cliente: ${customerNumber}` : "",
+    customer.phone ? `Telefono: ${customer.phone}` : "",
+    customer.email ? `Email: ${customer.email}` : "",
+  ].filter(Boolean);
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+function ensureSpace(document: jsPDF, requestedY: number, requiredHeight: number, margin: number): number {
+  const pageHeight = document.internal.pageSize.getHeight();
+  if (requestedY + requiredHeight <= pageHeight - margin) {
+    return requestedY;
+  }
+  document.addPage();
+  return margin;
+}
+
+function getLastTableY(document: jsPDF): number {
+  return (document as jsPDF & { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? 90;
+}
+
+function formatPdfCurrency(value: number): string {
+  return `${new Intl.NumberFormat("it-IT", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(value) ? value : 0)} EUR`;
+}
+
+function cleanPdfText(value: string): string {
+  return value.replaceAll("€", "EUR").replaceAll("·", "-");
+}
+
+function safeFileName(value: string): string {
+  return value.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "preventivo";
 }
