@@ -57,8 +57,8 @@ const COLORS = {
 };
 
 const PAYMENT_DETAILS = {
-  holder: "Foti Maria Valeria",
-  iban: "IT88 X033 8501 6011 0008 0201 322",
+  holder: "Foti Giovanni",
+  iban: "IT83 M033 8501 6011 0000 0974 318",
   bank: "IsyBank",
   depositPercent: 25,
 } as const;
